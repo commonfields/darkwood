@@ -12,7 +12,7 @@ defmodule Darkwood.Incidents.Annotation do
 
   def changeset(annotation, attrs) do
     annotation
-    |> cast(attrs, [:body, :event_id])
+    |> cast(attrs, [:author_name, :body, :event_id])
     |> validate_required([:author_name, :body])
     |> validate_length(:author_name, min: 1, max: 80)
     |> validate_length(:body, min: 1, max: 2000)

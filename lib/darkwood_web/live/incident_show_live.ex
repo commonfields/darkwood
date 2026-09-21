@@ -72,20 +72,41 @@ defmodule DarkwoodWeb.IncidentShowLive do
     do: {:noreply, reload_annotations(socket)}
 
   def handle_info({:event_created, event}, socket) do
-    # Incremental insert only — no full incident reload (DB meltdown path).
-    socket =
-      socket
-      |> stream_insert(:events, event, at: -1)
-      |> append_event_option(event)
+    # Incremental fast path for the common in-order case; re-stream sorted
+    # when a late/out-of-order event arrives so the timeline stays chronological.
+    events = socket.assigns.incident.events
 
-    {:noreply, socket}
+    if in_order_append?(events, event) do
+      socket =
+        socket
+        |> stream_insert(:events, event, at: -1)
+        |> assign(:incident, %{socket.assigns.incident | events: events ++ [event]})
+
+      {:noreply, socket}
+    else
+      updated = sort_events_asc(events ++ [event])
+
+      socket =
+        socket
+        |> stream(:events, updated, reset: true)
+        |> assign(:incident, %{socket.assigns.incident | events: updated})
+
+      {:noreply, socket}
+    end
   end
 
   def handle_info({:event_updated, event}, socket) do
+    # Aggregation only rewrites metadata; occurred_at never moves, so an
+    # in-place stream update preserves chronological order.
+    events =
+      Enum.map(socket.assigns.incident.events, fn e ->
+        if e.id == event.id, do: event, else: e
+      end)
+
     socket =
       socket
       |> stream_insert(:events, event)
-      |> append_event_option(event)
+      |> assign(:incident, %{socket.assigns.incident | events: events})
 
     {:noreply, socket}
   end
@@ -130,15 +151,34 @@ defmodule DarkwoodWeb.IncidentShowLive do
     |> Enum.sort_by(& &1.display_name)
   end
 
-  defp append_event_option(socket, event) do
-    incident = socket.assigns.incident
+  # Stable DOM id per display name. The raw `phx_ref` belongs to a single
+  # Presence meta, so it flips whenever the winning tab changes after the
+  # `uniq_by display_name` collapse above — causing needless DOM churn.
+  defp presence_id(display_name) when is_binary(display_name) do
+    :erlang.phash2(display_name) |> Integer.to_string()
+  end
 
-    if Enum.any?(incident.events, &(&1.id == event.id)) do
-      updated_events = Enum.map(incident.events, fn e -> if e.id == event.id, do: event, else: e end)
-      assign(socket, :incident, %{incident | events: updated_events})
-    else
-      assign(socket, :incident, %{incident | events: incident.events ++ [event]})
+  defp presence_id(_), do: "unknown"
+
+  defp in_order_append?([], _event), do: true
+
+  defp in_order_append?(events, event) do
+    last = List.last(events)
+
+    case DateTime.compare(event.occurred_at, last.occurred_at) do
+      :lt -> false
+      _ -> true
     end
+  end
+
+  defp sort_events_asc(events) do
+    Enum.sort(events, fn a, b ->
+      case DateTime.compare(a.occurred_at, b.occurred_at) do
+        :lt -> true
+        :gt -> false
+        :eq -> a.id <= b.id
+      end
+    end)
   end
 
   @impl true
@@ -186,7 +226,7 @@ defmodule DarkwoodWeb.IncidentShowLive do
           </h2><div class="mt-3 flex flex-wrap gap-2">
             <span
               :for={user <- @users}
-              id={"presence-#{user.phx_ref}"}
+              id={"presence-#{presence_id(user.display_name)}"}
               class="rounded-full bg-emerald-950 px-3 py-1 text-sm text-emerald-300"
             >● {user.display_name}</span><span :if={@users == []} class="text-sm text-slate-500">Connecting…</span>
           </div>

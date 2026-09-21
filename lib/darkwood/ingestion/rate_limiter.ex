@@ -1,7 +1,9 @@
 defmodule Darkwood.Ingestion.RateLimiter do
   @moduledoc """
-  Minimal sliding-window rate limiter for the ingest API.
+  Minimal fixed-window rate limiter for the ingest API.
   120 requests/minute per client IP (burst-tolerant).
+  Window starts on the first request after expiry; increments within
+  a live window are atomic via `:ets.update_counter/3`.
   """
   use GenServer
 
@@ -18,11 +20,14 @@ defmodule Darkwood.Ingestion.RateLimiter do
 
     try do
       case :ets.lookup(@table, ip) do
-        [{^ip, count, window_start}] when now - window_start < @window_ms ->
-          if count >= @limit do
+        [{^ip, _count, window_start}] when now - window_start < @window_ms ->
+          # Atomic increment; races on lookup+insert may under-count by one,
+          # which fail-opens a single request rather than dropping valid ones.
+          new_count = :ets.update_counter(@table, ip, {2, 1})
+
+          if new_count > @limit do
             {:error, :throttled}
           else
-            :ets.update_element(@table, ip, {2, count + 1})
             :ok
           end
 
@@ -31,11 +36,40 @@ defmodule Darkwood.Ingestion.RateLimiter do
           :ok
       end
     rescue
-      ArgumentError -> :ok
+      ArgumentError ->
+        # Table missing (not started) or key reaped between lookup and
+        # increment — fail open for availability, matching previous behavior.
+        try do
+          :ets.insert(@table, {ip, 1, now})
+        rescue
+          _ -> :ok
+        end
+
+        :ok
     end
   end
 
   def check(_), do: :ok
+
+  @doc "Clears all rate-limit buckets. Intended for test isolation."
+  def reset do
+    try do
+      :ets.delete_all_objects(@table)
+      :ok
+    rescue
+      _ -> :ok
+    end
+  end
+
+  @doc "Clears the bucket for a single key. Intended for test isolation."
+  def reset_key(ip) when is_binary(ip) do
+    try do
+      :ets.delete(@table, ip)
+      :ok
+    rescue
+      _ -> :ok
+    end
+  end
 
   @impl true
   def init(:ok) do
