@@ -1,5 +1,6 @@
 defmodule Darkwood.Incidents do
   import Ecto.Query
+  require Logger
   alias Ecto.Multi
   alias Darkwood.Repo
   alias Darkwood.Incidents.{Annotation, Incident, IncidentEvent}
@@ -23,8 +24,21 @@ defmodule Darkwood.Incidents do
 
   def get_incident_with_events(id) do
     case Repo.get(Incident, id) do
-      nil -> nil
-      incident -> Repo.preload(incident, events: from(e in IncidentEvent, order_by: [asc: e.occurred_at], limit: @max_events))
+      nil ->
+        nil
+
+      incident ->
+        # Newest N events (bounded read), presented oldest-first for the timeline.
+        incident =
+          Repo.preload(incident,
+            events:
+              from(e in IncidentEvent,
+                order_by: [desc: e.occurred_at, desc: e.id],
+                limit: @max_events
+              )
+          )
+
+        %{incident | events: sort_events_asc(incident.events)}
     end
   end
 
@@ -38,6 +52,16 @@ defmodule Darkwood.Incidents do
   defp clamp_limit(n, max) when is_integer(n) and n > 0, do: min(n, max)
   defp clamp_limit(_, max), do: max
 
+  defp sort_events_asc(events) do
+    Enum.sort(events, fn a, b ->
+      case DateTime.compare(a.occurred_at, b.occurred_at) do
+        :lt -> true
+        :gt -> false
+        :eq -> a.id <= b.id
+      end
+    end)
+  end
+
   def change_incident(incident \\ %Incident{}, attrs \\ %{}) do
     Incident.changeset(incident, attrs)
   end
@@ -45,7 +69,7 @@ defmodule Darkwood.Incidents do
   def create_incident(attrs) do
     case %Incident{} |> Incident.changeset(attrs) |> Repo.insert() do
       {:ok, incident} ->
-        Phoenix.PubSub.broadcast(Darkwood.PubSub, incidents_topic(), {:incident_created, incident})
+        broadcast(Darkwood.PubSub, incidents_topic(), {:incident_created, incident})
         {:ok, incident}
 
       error ->
@@ -62,9 +86,14 @@ defmodule Darkwood.Incidents do
   def list_events(id, opts) when is_list(opts) do
     limit = Keyword.get(opts, :limit, @max_events) |> clamp_limit(@max_events)
 
-    Repo.all(
-      from e in IncidentEvent, where: e.incident_id == ^id, order_by: [asc: e.occurred_at], limit: ^limit
+    # Newest N events (bounded read), presented oldest-first for the timeline.
+    from(e in IncidentEvent,
+      where: e.incident_id == ^id,
+      order_by: [desc: e.occurred_at, desc: e.id],
+      limit: ^limit
     )
+    |> Repo.all()
+    |> sort_events_asc()
   end
 
   def list_annotations(incident_or_id, opts \\ [])
@@ -73,13 +102,15 @@ defmodule Darkwood.Incidents do
   def list_annotations(id, opts) when is_list(opts) do
     limit = Keyword.get(opts, :limit, @max_annotations) |> clamp_limit(@max_annotations)
 
-    Repo.all(
-      from a in Annotation,
-        where: a.incident_id == ^id,
-        order_by: [asc: a.inserted_at],
-        limit: ^limit,
-        preload: [:event]
+    # Newest N annotations (bounded read), presented oldest-first.
+    from(a in Annotation,
+      where: a.incident_id == ^id,
+      order_by: [desc: a.inserted_at, desc: a.id],
+      limit: ^limit,
+      preload: [:event]
     )
+    |> Repo.all()
+    |> Enum.reverse()
   end
 
   def change_annotation(attrs \\ %{}), do: Annotation.changeset(%Annotation{}, attrs)
@@ -177,9 +208,9 @@ defmodule Darkwood.Incidents do
           broadcast(incident_id, {:event_created, event})
           {:ok, event}
 
-        {:ok, {:error, _} = err} ->
-          err
-
+        # Inner function only returns {:aggregated,_}/{:inserted,_} or
+        # rolls back, so success-with-error is unreachable; rollback
+        # surfaces here.
         {:error, {:error, _} = err} ->
           err
 
@@ -328,7 +359,9 @@ defmodule Darkwood.Incidents do
     case attrs["metadata"] || attrs[:metadata] do
       nil -> %{}
       %{} = meta -> meta
-      _ -> %{}
+      # Preserve invalid values so validate_ingest_fields/5 can reject
+      # them instead of silently coercing to %{}.
+      other -> other
     end
   end
 
@@ -455,5 +488,16 @@ defmodule Darkwood.Incidents do
 
   defp event_belongs_to_incident(_event_id, _incident_id), do: {:error, :event_not_in_incident}
 
-  defp broadcast(id, message), do: Phoenix.PubSub.broadcast(Darkwood.PubSub, topic(id), message)
+  defp broadcast(id, message), do: broadcast(Darkwood.PubSub, topic(id), message)
+
+  defp broadcast(pubsub, topic, message) do
+    case Phoenix.PubSub.broadcast(pubsub, topic, message) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("PubSub broadcast to #{topic} failed: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
 end
