@@ -3,6 +3,12 @@ defmodule DarkwoodWeb.IngestControllerTest do
   import Phoenix.LiveViewTest
 
   alias Darkwood.Incidents
+  alias Darkwood.Ingestion.RateLimiter
+
+  setup do
+    RateLimiter.reset()
+    :ok
+  end
 
   test "POST returns 202 only after the event is durable", %{conn: conn} do
     {:ok, incident} = Incidents.create_incident(%{title: "API ingest test"})
