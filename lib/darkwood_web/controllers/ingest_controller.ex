@@ -31,7 +31,8 @@ defmodule DarkwoodWeb.IngestController do
             "kind" => params["kind"],
             "level" => params["level"],
             "message" => params["message"],
-            "metadata" => params["metadata"] || %{},
+            # Default only on missing/nil so invalid types still fail validation.
+            "metadata" => ingest_metadata(params),
             "fingerprint" => params["fingerprint"],
             "occurred_at" => params["occurred_at"]
           }
@@ -112,11 +113,29 @@ defmodule DarkwoodWeb.IngestController do
     Ecto.Query.CastError -> nil
   end
 
+  defp ingest_metadata(params) do
+    case Map.fetch(params, "metadata") do
+      :error -> %{}
+      {:ok, nil} -> %{}
+      {:ok, value} -> value
+    end
+  end
+
   defp changeset_detail(changeset) do
     changeset
     |> Ecto.Changeset.traverse_errors(fn {msg, _opts} -> msg end)
     |> Enum.find_value("is invalid", fn {_field, messages} -> List.first(messages) end)
   end
+
+  defp metadata_too_large?(metadata) when is_map(metadata) do
+    try do
+      :erlang.external_size(metadata) > 32_768
+    rescue
+      _ -> true
+    end
+  end
+
+  defp metadata_too_large?(_), do: false
 
   defp validate(%{"kind" => kind, "level" => level, "message" => message, "metadata" => metadata} = attrs) do
     cond do
@@ -137,6 +156,9 @@ defmodule DarkwoodWeb.IngestController do
 
       map_size(metadata) > 50 ->
         {:error, "metadata has too many keys"}
+
+      metadata_too_large?(metadata) ->
+        {:error, "metadata is too large"}
 
       (attrs["fingerprint"] || "") != "" and String.length(to_string(attrs["fingerprint"] || "")) > 128 ->
         {:error, "fingerprint is too long"}
