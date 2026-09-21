@@ -53,14 +53,16 @@ Intended PubSub / Presence contract:
 
 Supported:
 
-- Display-name session (`display_name` + generated `client_id` in session only)
+- Display-name session (`display_name` + generated `client_id` in session only; sign out via `DELETE /logout`)
 - Incident list / create
 - Incident detail
-- Read-only incident event timeline
-- General and event-specific annotations
+- Read-only incident event timeline (bounded to the newest 500 events, shown oldest-first)
+- General and event-specific annotations (bounded to the newest 500, shown oldest-first)
 - Incident status changes
 - Real-time annotation / status updates
 - Real-time connected-user presence
+- Synchronous ingest API (`POST /api/v1/incidents/:id/ingest` — `202` means the event or its aggregation is durable in PostgreSQL; fixed-window rate limit of 120 requests/minute per client IP)
+- Health probe (`GET /health` with a DB check)
 - One realistic seed incident
 
 Incident events are read-only. There is no event-ingestion or event-creation UI in the MVP.
@@ -172,11 +174,16 @@ The application includes focused context, controller, LiveView, PubSub, and Pres
 ```text
 lib/
 ├── darkwood/
-│   ├── incidents.ex        # context: incidents, events, annotations
-│   └── incidents/          # Ecto schemas
+│   ├── incidents.ex        # context: incidents, events, annotations, ingest + dedup
+│   ├── incidents/          # Ecto schemas (incident, incident_event, annotation)
+│   └── ingestion/
+│       └── rate_limiter.ex # fixed-window per-IP rate limiter for the ingest API
 └── darkwood_web/
-    ├── controllers/        # display-name join flow
-    ├── live/               # incident list / detail LiveViews
+    ├── controllers/        # display-name join flow, ingest API, health probe
+    ├── live/               # incident list / detail LiveViews + session hook
+    │   └── session_hook.ex # requires display-name session for LiveViews
+    ├── components/
+    │   └── incident_components.ex # event aggregation badges
     └── presence.ex         # Phoenix Presence
 priv/
 ├── repo/migrations/       # incidents, events, annotations + FKs/indexes
