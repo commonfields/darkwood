@@ -11,6 +11,11 @@ defmodule Darkwood.Incidents.Incident do
       values: [:investigating, :identified, :mitigated, :resolved],
       default: :investigating
 
+    # The fingerprint that opened this incident. Set only by the grouper, never
+    # cast from user input — a repeat signal with the same fingerprint is
+    # routed to the open incident that already carries it.
+    field :signature, :string
+
     has_many :events, Darkwood.Incidents.IncidentEvent
     has_many :annotations, Darkwood.Incidents.Annotation
     timestamps(type: :utc_datetime_usec)

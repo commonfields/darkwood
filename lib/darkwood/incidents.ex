@@ -220,6 +220,16 @@ defmodule Darkwood.Incidents do
     end
   end
 
+  @doc """
+  Validates the fields common to every ingest path.
+
+  Shared with `Darkwood.Detection` so signal intake and incident ingest cannot
+  drift apart on what counts as valid.
+  """
+  def validate_ingest(kind, level, message, metadata, fingerprint) do
+    validate_ingest_fields(kind, level, message, metadata, fingerprint)
+  end
+
   defp validate_ingest_fields(kind, level, message, metadata, fingerprint) do
     kinds = ~w(request query http log error)
     levels = ~w(info warning error)
@@ -257,7 +267,17 @@ defmodule Darkwood.Incidents do
   # Fail closed: a supplied timestamp must parse and fall within the
   # acceptance window (5min future skew, 30d retention). Anything else is
   # a validation error — never silently replaced with `now`.
-  defp parse_occurred_at(attrs, now) do
+  @doc """
+  Parses and bounds-checks an optional `occurred_at`.
+
+  Shared with `Darkwood.Detection`. Fail-closed: a supplied timestamp must
+  parse and fall inside the acceptance window, never silently defaulted.
+  """
+  def parse_occurred_at(attrs, now) do
+    parse_occurred_at_fields(attrs, now)
+  end
+
+  defp parse_occurred_at_fields(attrs, now) do
     case attrs["occurred_at"] || attrs[:occurred_at] do
       nil ->
         {:ok, DateTime.truncate(now, :microsecond)}
@@ -356,6 +376,16 @@ defmodule Darkwood.Incidents do
   end
 
   defp normalize_ingest_metadata(attrs) do
+  normalize_ingest_metadata_value(attrs)
+end
+
+@doc """
+  Extracts and preserves `metadata` from an attrs map.
+
+  Shared with `Darkwood.Detection`. Non-map values are deliberately preserved
+  so validation can reject them instead of silently coercing to `%{}`.
+  """
+  def normalize_ingest_metadata_value(attrs) do
     case attrs["metadata"] || attrs[:metadata] do
       nil -> %{}
       %{} = meta -> meta
@@ -373,10 +403,14 @@ defmodule Darkwood.Incidents do
     end
   end
 
-  def compute_fingerprint(kind, message) do
-    :crypto.hash(:sha256, "#{to_string(kind)}:#{to_string(message)}")
-    |> Base.encode16(case: :lower)
-  end
+  @doc """
+  Computes the fingerprint for a signal.
+
+  Delegates to `Darkwood.Detection.Fingerprint` so incident ingest, signal
+  intake, and grouping all agree on the same key. Hashing `kind <> message`
+  byte-exact would make every occurrence unique and break grouping entirely.
+  """
+  defdelegate compute_fingerprint(kind, message), to: Darkwood.Detection.Fingerprint, as: :compute
 
   def topic(id), do: "incident:#{id}"
   def subscribe(id), do: Phoenix.PubSub.subscribe(Darkwood.PubSub, topic(id))
@@ -488,7 +522,7 @@ defmodule Darkwood.Incidents do
 
   defp event_belongs_to_incident(_event_id, _incident_id), do: {:error, :event_not_in_incident}
 
-  defp broadcast(id, message), do: broadcast(Darkwood.PubSub, topic(id), message)
+  def broadcast(id, message), do: broadcast(Darkwood.PubSub, topic(id), message)
 
   defp broadcast(pubsub, topic, message) do
     case Phoenix.PubSub.broadcast(pubsub, topic, message) do
