@@ -18,8 +18,7 @@ defmodule DarkwoodWeb.IngestController do
   @levels ~w(info warning error)
 
   def create(conn, %{"id" => id} = params) do
-    with :ok <- check_auth(conn),
-         :ok <- check_rate_limit(conn) do
+    with :ok <- DarkwoodWeb.ApiAuth.check(conn) do
       case safe_get(id) do
         nil ->
           conn
@@ -75,36 +74,6 @@ defmodule DarkwoodWeb.IngestController do
         |> put_status(:too_many_requests)
         |> json(%{errors: %{detail: "Rate limit exceeded"}})
     end
-  end
-
-  defp check_auth(conn) do
-    case Application.get_env(:darkwood, :ingest_api_key) do
-      nil -> :ok
-      "" -> :ok
-      expected -> if valid_key?(conn, expected), do: :ok, else: {:error, :unauthorized}
-    end
-  end
-
-  defp valid_key?(conn, expected) do
-    provided =
-      conn |> get_req_header("x-api-key") |> List.first() ||
-        bearer_token(conn) || conn.params["api_key"]
-
-    is_binary(provided) and Plug.Crypto.secure_compare(provided, expected)
-  end
-
-  defp bearer_token(conn) do
-    case get_req_header(conn, "authorization") do
-      ["Bearer " <> token] -> token
-      _ -> nil
-    end
-  end
-
-  defp check_rate_limit(conn) do
-    ip = conn.remote_ip |> Tuple.to_list() |> Enum.join(".")
-    Darkwood.Ingestion.RateLimiter.check(ip)
-  rescue
-    _ -> :ok
   end
 
   defp safe_get(id) do

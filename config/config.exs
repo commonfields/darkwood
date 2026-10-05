@@ -13,6 +13,14 @@ config :darkwood,
 
 config :darkwood, :ingest_api_key, nil
 
+# Signal-first detection. Both rules are stateless so they need no learned
+# baseline. `window_seconds` is the sliding window used by the rate-spike rule;
+# `spike_threshold` is how many same-fingerprint signals inside that window open
+# an incident. Overridable per environment.
+config :darkwood, :detection,
+  window_seconds: 300,
+  spike_threshold: 5
+
 # Configure the endpoint
 config :darkwood, DarkwoodWeb.Endpoint,
   url: [host: "localhost"],

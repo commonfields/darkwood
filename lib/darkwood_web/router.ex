@@ -31,6 +31,10 @@ defmodule DarkwoodWeb.Router do
     pipe_through :api
 
     post "/incidents/:id/ingest", IngestController, :create
+
+    # Signal-first ingest: no incident reference required. The detector routes
+    # the signal and may open an incident.
+    post "/ingest", SignalIngestController, :create
   end
 
   scope "/", DarkwoodWeb do
